@@ -298,7 +298,7 @@ if ($reports_source == TS_IMAP) {
 		print "using ssl without verify servercert.\n" if $debug;
 		$socketargs = [ SSL_verify_mode => SSL_VERIFY_NONE ];
 	}
-  
+
 	print "connection to $imapserver with Ssl => $imapssl, User => $imapuser, Ignoresizeerrors => $imapignoreerror\n" if $debug;
 
 	# Setup connection to IMAP server.
@@ -551,7 +551,7 @@ sub processXML {
 # itself is not checked to be a valid DMARC report.
 sub getXMLFromMessage {
 	my ($message) = (@_);
-	
+
 	# fixup type in trustwave SEG mails
         $message =~ s/ContentType:/Content-Type:/;
 
@@ -789,7 +789,7 @@ sub storeXMLInDatabase {
         my $policy_p = undef;
         my $policy_sp = undef;
         my $policy_pct = undef;
- 
+
         if (ref $xml->{'policy_published'} eq "HASH") {
                 $domain =  $xml->{'policy_published'}->{'domain'};
                 $policy_adkim = $xml->{'policy_published'}->{'adkim'};
@@ -999,8 +999,34 @@ sub storeXMLInDatabase {
 			return 0;
 		}
 
-		$dbh->do(qq{INSERT INTO rptrecord(serial,$iptype,rcount,disposition,spf_align,dkim_align,reason,dkimdomain,dkimresult,spfdomain,spfresult,identifier_hfrom)
-			VALUES(?,$ipval,?,?,?,?,?,?,?,?,?,?)},undef,$serial,$count,$disp,$spf_align,$dkim_align,$reason,$dkim,$dkimresult,$spf,$spfresult,$identifier_hfrom);
+		$dbh->do(qq{
+			INSERT INTO rptrecord
+			(
+				serial,
+				$iptype,
+				rcount,
+				disposition,
+				spf_align,
+				dkim_align,
+				reason,
+				dkimdomain,
+				dkimresult,
+				spfdomain,
+				spfresult,
+				identifier_hfrom)
+			VALUES(?,$ipval,?,?,?,?,?,?,?,?,?,?)},
+				undef,
+				$serial,
+				$count,
+				$disp,
+				$spf_align,
+				$dkim_align,
+				$reason,
+				$dkim,
+				$dkimresult,
+				$spf,
+				$spfresult,
+				$identifier_hfrom);
 		if ($dbh->errstr) {
 			warn "$scriptname: $org: $id: Cannot add report data to database. Skipped.\n";
 			rollback($dbh);

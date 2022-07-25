@@ -83,8 +83,8 @@ $imapport         = '143';
 $imapssl          = '0';        # If set to 1, remember to change server port to 993 and disable imaptls.
 $imaptls          = '0';        # Enabled as the default and best-practice.
 $tlsverify        = '0';        # Enable verify server cert as the default and best-practice.
-$imapignoreerror  = '0';          # set it to 1 if you see an "ERROR: message_string() 
-                                # expected 119613 bytes but received 81873 you may 
+$imapignoreerror  = '0';          # set it to 1 if you see an "ERROR: message_string()
+                                # expected 119613 bytes but received 81873 you may
                                 # need the IgnoreSizeErrors option" because of malfunction
                                 # imap server as MS Exchange 2007, ...
 $imapreadfolder   = 'dmarc';

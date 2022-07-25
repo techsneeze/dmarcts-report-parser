@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 
 ################################################################################
-# dmarcts-report-parser - A Perl based tool to parse DMARC reports from an IMAP
+# report-parser - A Perl based tool to parse DMARC and TLS reports from an IMAP
 # mailbox or from the filesystem, and insert the information into a database.
 # ( Formerly known as imap-dmarcts )
 #
@@ -1240,6 +1240,245 @@ sub rollback {
 		}
 	}
 }
+
+################################################################################
+
+# Extract fields from the JSON report data hash and store them into the database.
+# return 1 when ok, 0, for serious error and -1 for minor errors
+sub storeJSONInDatabase {
+	my $json = $_[0]; # $json is a reference to the json data
+
+	my $from = $json->{'date-range'}->{'start-datetime'};
+	my $to = $json->{'date-range'}->{'end-datetime'};
+	my $org = $json->{'organization-name'};
+	my $id = $json->{'report-id'};
+	my $contact = $json->{'contact-info'};
+	my $domain =  $json->{'policies'}[0]->{'policy'}->{'policy-domain'};
+	my $policy_type =  $json->{'policies'}[0]->{'policy'}->{'policy-type'};
+	my $policy_string = "";
+	if($json->{'policies'}[0]->{'policy'}->{'policy-string'}) {
+		$policy_string = join("\n",@{$json->{'policies'}[0]->{'policy'}->{'policy-string'}});
+	}
+	my $summary_failure = $json->{'policies'}[0]->{'summary'}->{'total-failure-session-count'};
+	my $summary_successful = $json->{'policies'}[0]->{'summary'}->{'total-successful-session-count'};
+
+	#Delete "Z" at the end of timestamp
+	$from =~ tr/Z//d;
+	$to =~ tr/Z//d;
+
+	# see if already stored
+	my $sth = $dbh->prepare(qq{SELECT org, serial FROM tls_report WHERE reportid=?});
+	$sth->execute($id);
+	while ( my ($xorg,$sid) = $sth->fetchrow_array() )
+	{
+		if ($reports_replace) {
+			# $sid is the serial of a tls report with reportid=$id
+			# Remove this $sid from tls_report table, but
+			# try to continue on failure rather than skipping.
+			print "Replacing $xorg $id.\n";
+			$dbh->do(qq{DELETE from tls_report WHERE serial=?}, undef, $sid);
+			if ($dbh->errstr) {
+				print "Cannot remove report from database (". $dbh->errstr ."). Try to continue.\n";
+			}
+		} else {
+			print "Already have $xorg $id, skipped\n";
+			# Do not store in DB, but return true, so the message can
+			# be moved out of the way, if configured to do so.
+			return 1;
+		}
+	}
+
+	my $sql = qq{
+		INSERT INTO tls_report
+		(
+			mindate,
+			maxdate,
+			org,
+			reportid,
+			contact,
+			domain,
+			policy_type,
+			policy_string,
+			summary_failure,
+			summary_successful,
+			raw_json
+		)
+		VALUES
+		(
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?
+		)
+	};
+
+	my $storejson = $json->{'raw_json'};
+	if ($raw_data_compress) {
+		my $gzipdata;
+		if(!gzip(\$storejson => \$gzipdata)) {
+			print "Cannot add gzip JSON to database ($GzipError). Skipped.\n";
+			return 0;
+			$storejson = "";
+		} else {
+			$storejson = encode_base64($gzipdata, "");
+		}
+	}
+	if (length($storejson) > $raw_data_max_size) {
+		print "Skipping storage of large JSON (".length($storejson)." bytes) as defined in config file.\n";
+		$storejson = "";
+	}
+	$dbh->do($sql, undef, $from, $to, $org, $id, $contact, $domain, $policy_type, $policy_string, $summary_failure, $summary_successful, $storejson);
+	if ($dbh->errstr) {
+		print "Cannot add report to database (". $dbh->errstr ."). Skipped.\n";
+		return 0;
+	}
+
+	my $serial = $dbh->last_insert_id(undef, undef, 'tls_report', undef);
+	if ($debug){
+		print " serial $serial ";
+	}
+
+	################################################################################
+	sub do_json_row($$$$) {
+		my ($serial,$recp,$org,$id) = @_;
+		my %r = %$recp;
+
+		my $result_type = $r{'result-type'};
+		my $receiving_mx_hostname = $r{'receiving-mx-hostname'};
+		my $receiving_mx_helo = $r{'receiving-mx-helo'};
+		my $failed_session_count = $r{'failed-session-count'};
+		my $additional_information = $r{'additional-info-uri'};
+		my $failure_reason_code = $r{'failure-reason-code'};
+
+		# What type of IP address?
+		# This should be turned into a function
+		my ($nip, $iptype, $ipval);
+
+		my $sending_mta_ip = $r{'sending-mta-ip'};
+		my $sending_mta_ipval = 0;
+		my $sending_mta_iptype = "ip";
+		if (length $sending_mta_ip){
+			if ($debug) {
+				print "ip=$sending_mta_ip\n";
+			}
+			if($nip = inet_pton(AF_INET, $sending_mta_ip)) {
+				$sending_mta_ipval = unpack "N", $nip;
+				$sending_mta_iptype = "ip";
+			} elsif($nip = inet_pton(AF_INET6, $sending_mta_ip)) {
+				$sending_mta_ipval = $dbx{to_hex_string}($nip);
+				$sending_mta_iptype = "ip6";
+			} else {
+				warn "$scriptname: $org: $id: ??? mystery ip $sending_mta_ip\n";
+				rollback($dbh);
+				return 0;
+			}
+		}
+
+		# What type of IP address?
+		# This should be turned into a function
+		my $receiving_ip = $r{'receiving-ip'};
+		my $receiving_ipval = 0;
+		my $receiving_iptype = "ip";
+		if (length $receiving_ip){
+			if ($debug) {
+				print "ip=$receiving_ip\n";
+			}
+			if($nip = inet_pton(AF_INET, $receiving_ip)) {
+				$receiving_ipval = unpack "N", $nip;
+				$receiving_iptype = "ip";
+			} elsif($nip = inet_pton(AF_INET6, $receiving_ip)) {
+				$receiving_ipval = $dbx{to_hex_string}($nip);
+				$receiving_iptype = "ip6";
+			} else {
+				warn "$scriptname: $org: $id: ??? mystery ip $receiving_ip\n";
+				rollback($dbh);
+				return 0;
+			}
+		}
+
+		$dbh->do(qq{
+			INSERT INTO tls_rptrecord
+			(
+				serial,
+				sending_mta_$sending_mta_iptype,
+				receiving_$receiving_iptype,
+				result_type,
+				receiving_mx_hostname,
+				receiving_mx_helo,
+				failed_session_count,
+				additional_information,
+				failure_reason_code
+			)
+			VALUES(?,$sending_mta_ipval,$receiving_ipval,?,?,?,?,?,?)},
+			undef,
+			$serial,
+			$result_type,
+			$receiving_mx_hostname,
+			$receiving_mx_helo,
+			$failed_session_count,
+			$additional_information,
+			$failure_reason_code);
+		if ($dbh->errstr) {
+			warn "$scriptname: $org: $id: Cannot add report data to database. Skipped.\n";
+			rollback($dbh);
+			return 0;
+		}
+		return 1;
+
+	}
+	# End do_json_row()
+	################################################################################
+
+	my $failure_details = $json->{'policies'}[0]->{'failure-details'};
+	my $res = 1;
+	if ( ! defined($failure_details) ) {
+		warn "$scriptname: $org: $id: No failure details in report.\n";
+		# return 0;
+	} elsif (ref $failure_details eq "HASH") {
+		if ($debug){
+			print "single record\n";
+		}
+		$res = -1 if !do_json_row($serial,$failure_details,$org,$id);
+	} elsif(ref $failure_details eq "ARRAY") {
+		if ($debug){
+			print "multi record\n";
+		}
+		foreach my $row (@$failure_details) {
+			$res = -1 if !do_json_row($serial,$row,$org,$id);
+		}
+	} else {
+		warn "$scriptname: $org: $id: mystery type " . ref($failure_details) . "\n";
+	}
+
+	if ($debug && $res <= 0) {
+		print "Raw JSON: $json->{raw_json}\n";
+	}
+
+	if ($res <= 0) {
+		if ($db_tx_support) {
+			warn "$scriptname: $org: $id: Cannot add records to tls_rptrecord. Rolling back DB transaction.\n";
+			rollback($dbh);
+		} else {
+			warn "$scriptname: $org: $id: errors while adding to rptrecord, serial $serial records likely obsolete.\n";
+		}
+	} else {
+		if ($db_tx_support) {
+			$dbh->commit;
+			if ($dbh->errstr) {
+				warn "$scriptname: $org: $id: Cannot commit transaction.\n";
+			}
+		}
+	}
+	return $res;
+}
+
 
 ################################################################################
 

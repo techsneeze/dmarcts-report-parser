@@ -24,9 +24,10 @@
 ################################################################################
 
 ################################################################################
-# The subroutines storeXMLInDatabase() and getXMLFromMessage() are based on
-# John R. Levine's rddmarc (http://www.taugh.com/rddmarc/). The following
-# special conditions apply to those subroutines:
+# The subroutines storeXMLInDatabase(), getDATAFromMessage(), storeJSONInDatabase()
+# and getJSONFromMessage() are based on # John R. Levine's rddmarc
+# (http://www.taugh.com/rddmarc/). The following special conditions apply to those
+#  subroutines:
 #
 # Copyright 2012, Taughannock Networks. All rights reserved.
 #
@@ -67,6 +68,7 @@ use MIME::Words qw(decode_mimewords);
 use MIME::Parser;
 use MIME::Parser::Filer;
 use XML::Simple;
+use JSON;
 use DBI;
 use Socket;
 use Socket6;
@@ -96,15 +98,15 @@ sub show_usage {
 	print "             config file. \n";
 	print "        -m : Read reports from mbox file(s) provided in PATH. \n";
 	print "        -e : Read reports from MIME email file(s) provided in PATH. \n";
-	print "        -x : Read reports from xml file(s) provided in PATH. \n";
+	print "        -x : Read reports from data file(s) provided in PATH. \n";
 	print "        -z : Read reports from zip file(s) provided in PATH. \n";
 	print "\n";
 	print " The following optional options are allowed: \n";
 	print "        -d : Print debug info. \n";
 	print "        -r : Replace existing reports rather than skipping them. \n";
-	print "  --delete : Delete processed message files (the XML is stored in the \n";
+	print "  --delete : Delete processed message files (the raw data is stored in the \n";
 	print "             database for later reference). \n";
-	print "    --info : Print out number of XML files or emails processed. \n";
+	print "    --info : Print out number of data files or emails processed. \n";
 	print "\n";
 }
 
@@ -117,7 +119,7 @@ sub show_usage {
 ################################################################################
 
 # Define all possible configuration options.
-our ($debug, $delete_reports, $delete_failed, $reports_replace, $maxsize_xml, $compress_xml,
+our ($debug, $delete_reports, $delete_failed, $reports_replace, $maxsize_xml, $compress_xml, $raw_data_compress, $raw_data_max_size,
 	$dbtype, $dbname, $dbuser, $dbpass, $dbhost, $dbport, $db_tx_support,
   $imapserver, $imapport, $imapuser, $imappass, $imapignoreerror, $imapssl, $imaptls, $imapmovefolder,
 	$imapmovefoldererr, $imapreadfolder, $imapopt, $tlsverify, $processInfo);
@@ -128,7 +130,7 @@ $dbtype = 'mysql';
 $db_tx_support	= 1;
 
 # used in messages
-my $scriptname = 'dmarcts-report-parser.pl';
+my $scriptname = $0;
 
 # allowed values for the DB columns, also used to build the enum() in the
 # CREATE TABLE statements in checkDatabase(), in order defined here
@@ -344,11 +346,14 @@ if ($reports_source == TS_IMAP) {
 
 		# Loop through IMAP messages.
 		foreach my $msg (@msgs) {
+			my $filecontent;
+			my $data_type;
 
-			my $processResult = processXML(TS_MESSAGE_FILE, $imap->message_string($msg), "IMAP message with UID #".$msg);
+			($filecontent, $data_type) = &getDATAFromMessage($imap->message_string($msg));
+			my $processResult = processDATA(TS_MESSAGE_FILE, $filecontent, $msg, "IMAP message with UID #");
 			$processedReport++;
 			if ($processResult & 4) {
-				# processXML returned a value with database error bit enabled, do nothing at all!
+				# processDATA returns a value with database error bit enabled, do nothing at all!
 				if ($imapmovefoldererr) {
 					# if we can, move to error folder
 					moveToImapFolder($imap, $msg, $imapmovefoldererr);
@@ -357,19 +362,19 @@ if ($reports_source == TS_IMAP) {
 					next;
 				}
 			} elsif ($processResult & 2) {
-				# processXML return a value with delete bit enabled.
+				# processDATAprocessDATA returns a value with delete bit enabled.
 				$imap->delete_message($msg)
 				or warn "$scriptname: Could not delete IMAP message. [$@]\n";
 			} elsif ($imapmovefolder) {
 				if ($processResult & 1 || !$imapmovefoldererr) {
-					# processXML processed the XML OK, or it failed and there is no error imap folder
+					# processDATA processed the XML OK, or it failed and there is no error imap folder
 					moveToImapFolder($imap, $msg, $imapmovefolder);
 				} elsif ($imapmovefoldererr) {
-					# processXML failed and error folder set
+					# processDATA failed and error folder set
 					moveToImapFolder($imap, $msg, $imapmovefoldererr);
 				}
 			} elsif ($imapmovefoldererr && !($processResult & 1)) {
-				# processXML failed, error imap folder set, but imapmovefolder unset. An unlikely setup, but still...
+				# processDATA failed, error imap folder set, but imapmovefolder unset. An unlikely setup, but still...
 				moveToImapFolder($imap, $msg, $imapmovefoldererr);
 			}
 		}
@@ -383,9 +388,18 @@ if ($reports_source == TS_IMAP) {
 	$imap->logout();
 	if ( $debug || $processInfo ) { print "$scriptname: Processed $processedReport emails.\n"; }
 
-} else { # TS_MESSAGE_FILE or TS_XML_FILE or TS_MBOX_FILE
+} else { # TS_MBOX_FILE, TS_ZIP_FILE, TS_MESSAGE_FILE or TS_XML_FILE
 
 	my $counts = 0;
+# mimetypes test routine
+# 	foreach my $a (@ARGV) {
+# 		my @file_list = glob($a);
+# 		foreach my $f (@file_list) {
+# 			my $mtype = mimetype($f);
+# 			print "File: $f MType: $mtype\n";
+# 		}
+# }
+
 	foreach my $a (@ARGV) {
 		# Linux bash supports wildcard expansion BEFORE the script is
 		# called, so here we only see a list of files. Other OS behave
@@ -395,17 +409,18 @@ if ($reports_source == TS_IMAP) {
 
 		foreach my $f (@file_list) {
 			my $filecontent;
+			my $data_type = "";
 
 			if ($reports_source == TS_MBOX_FILE) {
 				my $parser = Mail::Mbox::MessageParser->new({"file_name" => $f, "debug" => $debug, "enable_cache" => 0});
 				my $num = 0;
-
 				do {
 					$num++;
 					$filecontent = $parser->read_next_email();
 					if (defined($filecontent)) {
-						if (processXML(TS_MESSAGE_FILE, $filecontent, "message #$num of mbox file <$f>") & 2) {
-							# processXML return a value with delete bit enabled
+						($filecontent, $data_type) = &getDATAFromMessage($filecontent);
+						if (processDATA(TS_MESSAGE_FILE, $filecontent, $f, "message #$num of mbox file <$f>") & 2) {
+							# processDATAprocessDATA returns a value with delete bit enabled
 							warn "$scriptname: Removing message #$num from mbox file <$f> is not yet supported.\n";
 						}
 						$counts++;
@@ -414,34 +429,35 @@ if ($reports_source == TS_IMAP) {
 
 			} elsif ($reports_source == TS_ZIP_FILE) {
 				# filecontent is zip file
-				$filecontent = getXMLFromZip($f);
-				if (processXML(TS_ZIP_FILE, $filecontent, "xml file <$f>") & 2) {
-					# processXML return a value with delete bit enabled
+				($filecontent, $data_type) = &getDATAFromZip($f);
+				if (processDATA(TS_ZIP_FILE, $filecontent, $f, "$data_type file ") & 2) {
+					# processDATAprocessDATA returns a value with delete bit enabled
 					unlink($f);
 				}
 				$counts++;
 			} elsif (open(FILE, "<", $f)) {
 
-				$filecontent = join("", <FILE>);
-				close FILE;
-
 				if ($reports_source == TS_MESSAGE_FILE) {
 					# filecontent is a mime message with zip or xml part
-					if (processXML(TS_MESSAGE_FILE, $filecontent, "message file <$f>") & 2) {
-						# processXML return a value with delete bit enabled
+					$filecontent = join("", <FILE>);
+					($filecontent, $data_type) = &getDATAFromMessage($filecontent);
+					if (processDATA(TS_MESSAGE_FILE, $filecontent, $f, "$data_type file ") & 2) {
+						# processDATAprocessDATA returns a value with delete bit enabled
 						unlink($f);
 					}
 					$counts++;
 				} elsif ($reports_source == TS_XML_FILE) {
 					# filecontent is xml file
-					if (processXML(TS_XML_FILE, $filecontent, "xml file <$f>") & 2) {
-						# processXML return a value with delete bit enabled
+					($filecontent, $data_type) = &getDATAFromFile($f);
+					if (processDATA(TS_XML_FILE, $filecontent, $f, "$data_type file ") & 2) {
+						# processDATAprocessDATA returns a value with delete bit enabled
 						unlink($f);
 					}
 					$counts++;
 				} else {
 					warn "$scriptname: Unknown reports_source <$reports_source> for file <$f>. Skipped.\n";
 				}
+				close FILE;
 
 			} else {
 				warn "$scriptname: Could not open file <$f>: $!. Skipped.\n";
@@ -488,13 +504,13 @@ sub moveToImapFolder {
 	}
 }
 
-sub processXML {
-	my ($type, $filecontent, $f) = (@_);
+sub processDATA {
+	my ($type, $filecontent, $f, $data_type) = (@_);
 
 	if ($debug) {
 		print "\n";
 		print "----------------------------------------------------------------\n";
-		print "Processing $f \n";
+		print "Processing $data_type $f \n";
 		print "----------------------------------------------------------------\n";
 		print "Type: $type\n";
 		print "FileContent: $filecontent\n";
@@ -502,14 +518,19 @@ sub processXML {
 		print "----------------------------------------------------------------\n";
 	}
 
-	my $xml; #TS_XML_FILE or TS_MESSAGE_FILE
-	if ($type == TS_MESSAGE_FILE) {$xml = getXMLFromMessage($filecontent);}
-	elsif ($type == TS_ZIP_FILE) {$xml = $filecontent;}
-	else {$xml = getXMLFromXMLString($filecontent);}
+	# my $data; #TS_XML_FILE or TS_MESSAGE_FILE
+	# if ($type == TS_MESSAGE_FILE) {
+	# 	# ($data, $data_type) = &getDATAFromMessage($filecontent);
+	# 	$data = $filecontent;
+	# } elsif ($type == TS_ZIP_FILE) {
+	# 	$data = $filecontent;
+	# } else { #TS_
+	# 	$data = $filecontent;
+	# }
 
-	# If !$xml, the file/mail is probably not a DMARC report.
+	# If !$filecontent, the file/mail is probably not a DMARC report.
 	# So do not storeXMLInDatabase.
-	if ($xml && storeXMLInDatabase($xml) <= 0) {
+	if ($filecontent && storeDATAInDatabase($filecontent) <= 0) {
 		# If storeXMLInDatabase returns false, there was some sort
 		# of database storage failure and we MUST NOT delete the
 		# file, because it has not been pushed into the database.
@@ -520,8 +541,8 @@ sub processXML {
 
 	# Delete processed message, if the --delete option
 	# is given. Failed reports are only deleted, if delete_failed is given.
-	if ($delete_reports && ($xml || $delete_failed)) {
-		if ($xml) {
+	if ($delete_reports && ($filecontent || $delete_failed)) {
+		if ($filecontent) {
 			print "Removing after report has been processed.\n" if $debug;
 			return 3; #xml ok (1), delete file (2)
 		} else {
@@ -535,7 +556,7 @@ sub processXML {
 		}
 	}
 
-	if ($xml) {
+	if ($filecontent) {
 		return 1;
 	} else {
 		warn "$scriptname: The $f does not seem to contain a valid DMARC report. Skipped.\n";
@@ -546,10 +567,10 @@ sub processXML {
 
 ################################################################################
 
-# Walk through a mime message and return a reference to the XML data containing
-# the fields of the first ZIPed XML file embedded into the message. The XML
+# Walk through a mime message and return a reference to the data containing
+# the fields of the first ZIPed file embedded into the message. The data
 # itself is not checked to be a valid DMARC report.
-sub getXMLFromMessage {
+sub getDATAFromMessage {
 	my ($message) = (@_);
 
 	# fixup type in trustwave SEG mails
@@ -580,7 +601,7 @@ sub getXMLFromMessage {
 
 		$location = $body->path;
 
-	} elsif (lc $mtype eq "application/gzip" or lc $mtype eq "application/x-gzip") {
+		} elsif (lc $mtype eq "application/gzip" or lc $mtype eq "application/x-gzip" or lc $mtype eq "application/tlsrpt+gzip") {
 		if ($debug) {
 			print "This is a GZIP file \n";
 		}
@@ -588,7 +609,7 @@ sub getXMLFromMessage {
 		$location = $body->path;
 		$isgzip = 1;
 
-	} elsif (lc $mtype =~ "multipart/") {
+	} elsif (lc $mtype eq "multipart/mixed" or lc $mtype eq "multipart/report") {
 		# At the moment, nease.net messages are multi-part, so we need
 		# to breakdown the attachments and find the zip.
 		if ($debug) {
@@ -601,7 +622,7 @@ sub getXMLFromMessage {
 			my $part = $ent->parts($i);
 
 			# Find a zip file to work on...
-			if(lc $part->mime_type eq "application/gzip" or lc $part->mime_type eq "application/x-gzip") {
+			if(lc $part->mime_type eq "application/gzip" or lc $part->mime_type eq "application/x-gzip" or lc $part->mime_type eq "application/tlsrpt+gzip") {
 				$location = $ent->parts($i)->{ME_Bodyhandle}->{MB_Path};
 				$isgzip = 1;
 				print "$location\n" if $debug;
@@ -640,42 +661,59 @@ sub getXMLFromMessage {
 	}
 
 
-	# If a ZIP has been found, extract XML and parse it.
-	my $xml;
+	# If a ZIP has been found, extract data and parse it.
 	if(defined($location)) {
 		if ($debug) {
 			print "body is in " . $location . "\n";
 		}
 
-		# Open the zip file and process the XML contained inside.
+		# Open the zip file and process the data contained inside.
 		my $unzip = "";
 		if($isgzip) {
-			open(XML, "<:gzip", $location)
+			open(DATA, "<:gzip", $location)
 			or $unzip = "ungzip";
 		} else {
-			open(XML, "-|", "unzip", "-p", $location)
+			open(DATA, "-|", "unzip", "-p", $location)
 			or $unzip = "unzip"; # Will never happen.
 
 			# Sadly unzip -p never failes, but we can check if the
 			# filehandle points to an empty file and pretend it did
 			# not open/failed.
-			if (eof XML) {
+			if (eof DATA) {
 				$unzip = "unzip";
 			}
 		}
 
-		# Read XML if possible (if open)
+		# Read data if possible (if open)
 		if ($unzip eq "") {
-			$xml = getXMLFromXMLString(join("", <XML>));
-			if (!$xml) {
-				warn "$scriptname: Subject: $subj\n:";
-				warn "$scriptname: The XML found in ZIP file (temp. location: <$location>) does not seem to be valid XML! \n";
+			my $report_data = "";
+			my $raw_data = join("", <DATA>);
+			close DATA;
+			$report_data = getXMLFromXMLString($raw_data);
+			if (!$report_data) {
+				if ($debug) {
+					warn "$scriptname: Subject: $subj\n:";
+					warn "$scriptname: The data found in ZIP file (temp. location: <$location>) does not seem to be valid XML! Let's try JSON...\n";
+				}
+			} else {
+					return ($report_data, "xml");
 			}
-			close XML;
+			$report_data = getJSONFromJSONString($raw_data);
+			if (!$report_data) {
+				if ($debug) {
+					warn "$scriptname: Subject: $subj\n:";
+					warn "$scriptname: The data found in ZIP file (temp. location: <$location>) does not seem to be valid JSON either! \n";
+				}
+			} else {
+				if ($debug) {
+					warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
+				}
+				return ($report_data, "json");
+			}
 		} else {
 			warn "$scriptname: Subject: $subj\n:";
 			warn "$scriptname: Failed to $unzip ZIP file (temp. location: <$location>)! \n";
-			close XML;
+			close DATA;
 		}
 	} else {
 		warn "$scriptname: Subject: $subj\n:";
@@ -684,12 +722,11 @@ sub getXMLFromMessage {
 
 	if($body) {$body->purge;}
 	if($ent) {$ent->purge;}
-	return $xml;
 }
 
 ################################################################################
 
-sub getXMLFromZip {
+sub getDATAFromZip {
 	my $filename = $_[0];
 	my $mtype = mimetype($filename);
 
@@ -715,42 +752,121 @@ sub getXMLFromZip {
 		}
 	}
 
-	# If a ZIP has been found, extract XML and parse it.
-	my $xml;
+	# If a ZIP has been found, extract DATA and parse it.
 	if(defined($filename)) {
-		# Open the zip file and process the XML contained inside.
+		# Open the zip file and process the DATA contained inside.
 		my $unzip = "";
 		if($isgzip) {
-			open(XML, "<:gzip", $filename)
+			open(DATA, "<:gzip", $filename)
 			or $unzip = "ungzip";
 		} else {
-			open(XML, "-|", "unzip", "-p", $filename)
+			open(DATA, "-|", "unzip", "-p", $filename)
 			or $unzip = "unzip"; # Will never happen.
 
-			# Sadly unzip -p never failes, but we can check if the
+			# Sadly unzip -p never fails, but we can check if the
 			# filehandle points to an empty file and pretend it did
 			# not open/failed.
-			if (eof XML) {
+			if (eof DATA) {
 				$unzip = "unzip";
 			}
 		}
 
-		# Read XML if possible (if open)
+		# Read DATA if possible (if open)
 		if ($unzip eq "") {
-			$xml = getXMLFromXMLString(join("", <XML>));
-			if (!$xml) {
-				warn "$scriptname: The XML found in ZIP file (<$filename>) does not seem to be valid XML! \n";
+			my $report_data = "";
+			my $raw_data = join("", <DATA>);
+			close DATA;
+			$report_data = getXMLFromXMLString($raw_data);
+			if (!$report_data) {
+				if ($debug) {
+					warn "$scriptname: The data found in ZIP file does not seem to be valid XML! Let's try JSON... \n";
+				}
+			} else {
+				return ($report_data, "xml");
 			}
-			close XML;
+			$report_data = getJSONFromJSONString($raw_data);
+			if (!$report_data) {
+				if ($debug) {
+					warn "$scriptname: The data found in ZIP file does not seem to be valid JSON, either! \n";
+				}
+			} else {
+				if ($debug) {
+					warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
+				}
+				return ($report_data, "json");
+			}
 		} else {
 			warn "$scriptname: Failed to $unzip ZIP file (<$filename>)! \n";
-			close XML;
+			close DATA;
 		}
 	} else {
 		warn "$scriptname: Could not find an <$filename>! \n";
 	}
 
-	return $xml;
+}
+
+################################################################################
+
+sub getDATAFromFile {
+	my $filename = $_[0];
+	my $mtype = mimetype($filename);
+
+	if ($debug) {
+		print "Filename: $filename, MimeType: $mtype\n";
+	}
+
+	# my $isgzip = 0;
+
+	if(lc $mtype eq "application/xml") {
+		if ($debug) {
+			print "This is an XML file \n";
+		}
+	} elsif (lc $mtype eq "application/json") {
+		if ($debug) {
+			print "This is a JSON file \n";
+		}
+		# $isgzip = 1;
+	} else {
+		if ($debug) {
+			print "This is not an archive file \n";
+		}
+	}
+
+	# If a XML or JSON has been found, extract DATA and parse it.
+	if(defined($filename)) {
+		# Read DATA if possible (if open)
+		# if ($unzip eq "") {
+			open(DATA, "<", $filename);
+			my $report_data = "";
+			my $raw_data = join("", <DATA>);
+			close DATA;
+			$report_data = getXMLFromXMLString($raw_data);
+			if (!$report_data) {
+				if ($debug) {
+					warn "$scriptname: The data found in ZIP file does not seem to be valid XML! Let's try JSON... \n";
+				}
+			} else {
+				return ($report_data, "xml");
+			}
+			$report_data = getJSONFromJSONString($raw_data);
+			if (!$report_data) {
+				if ($debug) {
+					warn "$scriptname: The data found in ZIP file does not seem to be valid JSON, either! \n";
+				}
+			} else {
+				if ($debug) {
+					warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
+				}
+				return ($report_data, "json");
+			}
+		# } else {
+		# 	warn "$scriptname: Failed to $unzip ZIP file (<$filename>)! \n";
+		# 	close DATA;
+		# }
+	} else {
+		warn "$scriptname: Could not find an <$filename>! \n";
+	}
+
 }
 
 ################################################################################
@@ -767,6 +883,38 @@ sub getXMLFromXMLString {
 	} or do {
 		return undef;
 	}
+}
+
+
+################################################################################
+
+sub getJSONFromJSONString {
+	my $raw_json = $_[0];
+
+	eval {
+		my $ref = decode_json($raw_json);
+		$ref->{'raw_json'} = $raw_json;
+
+		return $ref;
+	} or do {
+		return undef;
+	}
+}
+
+
+################################################################################
+
+sub storeDATAInDatabase {
+	my $raw_data = $_[0];
+
+	my $database_return_value = 0;
+
+	if ( $raw_data->{'report_metadata'}->{'org_name'} ) {
+		$database_return_value = storeXMLInDatabase($raw_data);
+	} else {
+		$database_return_value = storeJSONInDatabase($raw_data);
+	}
+	return $database_return_value;
 }
 
 
@@ -841,7 +989,7 @@ sub storeXMLInDatabase {
 	my $sql = qq{INSERT INTO report(mindate,maxdate,domain,org,reportid,email,extra_contact_info,policy_adkim, policy_aspf, policy_p, policy_sp, policy_pct, raw_xml)
 			VALUES($dbx{epoch_to_timestamp_fn}(?),$dbx{epoch_to_timestamp_fn}(?),?,?,?,?,?,?,?,?,?,?,?)};
 	my $storexml = $xml->{'raw_xml'};
-	if ($compress_xml) {
+	if ($raw_data_compress) {
 		my $gzipdata;
 		if(!gzip(\$storexml => \$gzipdata)) {
 			warn "$scriptname: $org: $id: Cannot add gzip XML to database ($GzipError). Skipped.\n";
@@ -852,7 +1000,7 @@ sub storeXMLInDatabase {
 			$storexml = encode_base64($gzipdata, "");
 		}
 	}
-	if (length($storexml) > $maxsize_xml) {
+	if (length($storexml) > $raw_data_max_size) {
 		warn "$scriptname: $org: $id: Skipping storage of large XML (".length($storexml)." bytes) as defined in config file.\n";
 		$storexml = "";
 	}
@@ -867,7 +1015,9 @@ sub storeXMLInDatabase {
 	if ($debug){
 		print " serial $serial \n";
 	}
-	sub dorow($$$$) {
+
+	################################################################################
+	sub do_xml_row($$$$) {
 		my ($serial,$recp,$org,$id) = @_;
 		my %r = %$recp;
 
@@ -1034,19 +1184,21 @@ sub storeXMLInDatabase {
 		}
 		return 1;
 	}
+	# End do_xml_row()
+	################################################################################
 
 	my $res = 1;
 	if(ref $record eq "HASH") {
 		if ($debug){
 			print "single record\n";
 		}
-		$res = -1 if !dorow($serial,$record,$org,$id);
+		$res = -1 if !do_xml_row($serial,$record,$org,$id);
 	} elsif(ref $record eq "ARRAY") {
 		if ($debug){
 			print "multi record\n";
 		}
 		foreach my $row (@$record) {
-			$res = -1 if !dorow($serial,$row,$org,$id);
+			$res = -1 if !do_xml_row($serial,$row,$org,$id);
 		}
 	} else {
 		warn "$scriptname: $org: $id: mystery type " . ref($record) . "\n";

@@ -93,10 +93,10 @@ $imapreadfolder   = 'dmarc';
 # the --delete option!)
 $imapmovefolder = 'dmarc/processed';
 
-# maximum size of XML files to store in database, long files can cause transaction aborts
-$maxsize_xml = 50000;
+# maximum size of data files to store in database, long files can cause transaction aborts
+$raw_data_max_size = 50000;
 # store XML as base64 encopded gzip in database (save space, harder usable)
-$compress_xml = 0;
+$raw_data_compress = 0;
 
 # if there was an error during file processing (message does not contain XML, JSON or ZIP parts,
 # or a database error) the parser reports an error and does not delete the file, even if

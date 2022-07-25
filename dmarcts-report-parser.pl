@@ -986,8 +986,41 @@ sub storeXMLInDatabase {
 		}
 	}
 
-	my $sql = qq{INSERT INTO report(mindate,maxdate,domain,org,reportid,email,extra_contact_info,policy_adkim, policy_aspf, policy_p, policy_sp, policy_pct, raw_xml)
-			VALUES($dbx{epoch_to_timestamp_fn}(?),$dbx{epoch_to_timestamp_fn}(?),?,?,?,?,?,?,?,?,?,?,?)};
+	my $sql = qq{
+		INSERT INTO report
+		(
+			mindate,
+			maxdate,
+			domain,
+			org,
+			reportid,
+			email,
+			extra_contact_info,
+			policy_adkim,
+			policy_aspf,
+			policy_p,
+			policy_sp,
+			policy_pct,
+			raw_xml
+		)
+		VALUES
+		(
+			$dbx{epoch_to_timestamp_fn}(?),
+			$dbx{epoch_to_timestamp_fn}(?),
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?
+		)
+	};
+
 	my $storexml = $xml->{'raw_xml'};
 	if ($raw_data_compress) {
 		my $gzipdata;

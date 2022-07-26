@@ -72,7 +72,7 @@
 				"raw_json"				, "text"										, "",
 				],
 			additional_definitions 		=> "PRIMARY KEY (serial), UNIQUE KEY domain (domain,reportid)",
-			table_options			=> "ROW_FORMAT=COMPRESSED",
+			table_options			=> "",
 			indexes				=> [],
 				"CREATE UNIQUE INDEX tls_report_uidx_domain ON tls_report (domain, reportid);"
 			},

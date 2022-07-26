@@ -71,7 +71,7 @@
 				"summary_successful"	, "bigint"									, "GENERATED ALWAYS AS IDENTITY",
 				"raw_json"				, "text"										, "",
 				],
-			additional_definitions 		=> "PRIMARY KEY (serial), UNIQUE KEY domain (domain,reportid)",
+			additional_definitions 		=> "PRIMARY KEY (serial)",
 			table_options			=> "",
 			indexes				=> [],
 				"CREATE UNIQUE INDEX tls_report_uidx_domain ON tls_report (domain, reportid);"

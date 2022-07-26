@@ -91,7 +91,7 @@
 				"additional_information"	, "character varying(255)"		, "",
 				"failure_reason_code"		, "character varying(255)"		, "",
 				],
-			additional_definitions 		=> "KEY serial (serial,sending_mta_ip), KEY serial6 (serial,sending_mta_ip6)",
+			additional_definitions 		=> "PRIMARY KEY(id)",
 			table_options			=> "",
 			indexes				=> [],
 				"CREATE INDEX tls_rptrecord_idx_serial ON tls_rptrecord (serial, ip);",

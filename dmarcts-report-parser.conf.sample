@@ -23,8 +23,8 @@ $imapport         = '143';
 $imapssl          = '0';        # If set to 1, remember to change server port to 993 and disable imaptls.
 $imaptls          = '1';        # Enabled as the default and best-practice.
 $tlsverify        = '1';        # Enable verify server cert as the default and best-practice.
-$imapignoreerror  = '0';          # set it to 1 if you see an "ERROR: message_string() 
-                                # expected 119613 bytes but received 81873 you may 
+$imapignoreerror  = '0';          # set it to 1 if you see an "ERROR: message_string()
+                                # expected 119613 bytes but received 81873 you may
                                 # need the IgnoreSizeErrors option" because of malfunction
                                 # imap server as MS Exchange 2007, ...
 $imapreadfolder   = 'dmarc';
@@ -38,12 +38,12 @@ $imapmovefolder = 'dmarc/processed';
 $imapmovefoldererr = 'Inbox.notProcessed';
 
 # maximum size of XML files to store in database, long files can cause transaction aborts
-$maxsize_xml = 50000;
+$raw_data_max_size = 50000;
 # store XML as base64 encopded gzip in database (save space, harder usable)
-$compress_xml = 0;
+$raw_data_compress = 0;
 
-# if there was an error during file processing (message does not contain XML or ZIP parts, 
-# or a database error) the parser reports an error and does not delete the file, even if 
-# delete_reports is set (or --delete is given). Deletion can be enforced by delete_failed, 
+# if there was an error during file processing (message does not contain XML or ZIP parts,
+# or a database error) the parser reports an error and does not delete the file, even if
+# delete_reports is set (or --delete is given). Deletion can be enforced by delete_failed,
 # however not for database errors.
 $delete_failed = 0;

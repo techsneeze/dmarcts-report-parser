@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 
 ################################################################################
-# dmarcts-report-parser - A Perl based tool to parse DMARC reports from an IMAP
+# report-parser - A Perl based tool to parse DMARC and TLS reports from an IMAP
 # mailbox or from the filesystem, and insert the information into a database.
 # ( Formerly known as imap-dmarcts )
 #
@@ -24,9 +24,10 @@
 ################################################################################
 
 ################################################################################
-# The subroutines storeXMLInDatabase() and getXMLFromMessage() are based on
-# John R. Levine's rddmarc (http://www.taugh.com/rddmarc/). The following
-# special conditions apply to those subroutines:
+# The subroutines storeXMLInDatabase(), getDATAFromMessage(), storeJSONInDatabase()
+# and getJSONFromMessage() are based on # John R. Levine's rddmarc
+# (http://www.taugh.com/rddmarc/). The following special conditions apply to those
+#  subroutines:
 #
 # Copyright 2012, Taughannock Networks. All rights reserved.
 #
@@ -67,6 +68,7 @@ use MIME::Words qw(decode_mimewords);
 use MIME::Parser;
 use MIME::Parser::Filer;
 use XML::Simple;
+use JSON;
 use DBI;
 use Socket;
 use Socket6;
@@ -96,15 +98,15 @@ sub show_usage {
 	print "             config file. \n";
 	print "        -m : Read reports from mbox file(s) provided in PATH. \n";
 	print "        -e : Read reports from MIME email file(s) provided in PATH. \n";
-	print "        -x : Read reports from xml file(s) provided in PATH. \n";
+	print "        -x : Read reports from data file(s) provided in PATH. \n";
 	print "        -z : Read reports from zip file(s) provided in PATH. \n";
 	print "\n";
 	print " The following optional options are allowed: \n";
 	print "        -d : Print debug info. \n";
 	print "        -r : Replace existing reports rather than skipping them. \n";
-	print "  --delete : Delete processed message files (the XML is stored in the \n";
+	print "  --delete : Delete processed message files (the raw data is stored in the \n";
 	print "             database for later reference). \n";
-	print "    --info : Print out number of XML files or emails processed. \n";
+	print "    --info : Print out number of data files or emails processed. \n";
 	print "\n";
 }
 
@@ -117,7 +119,7 @@ sub show_usage {
 ################################################################################
 
 # Define all possible configuration options.
-our ($debug, $delete_reports, $delete_failed, $reports_replace, $maxsize_xml, $compress_xml,
+our ($debug, $delete_reports, $delete_failed, $reports_replace, $maxsize_xml, $compress_xml, $raw_data_compress, $raw_data_max_size,
 	$dbtype, $dbname, $dbuser, $dbpass, $dbhost, $dbport, $db_tx_support,
   $imapserver, $imapport, $imapuser, $imappass, $imapignoreerror, $imapssl, $imaptls, $imapmovefolder,
 	$imapmovefoldererr, $imapreadfolder, $imapopt, $tlsverify, $processInfo);
@@ -128,7 +130,7 @@ $dbtype = 'mysql';
 $db_tx_support	= 1;
 
 # used in messages
-my $scriptname = 'dmarcts-report-parser.pl';
+my $scriptname = $0;
 
 # allowed values for the DB columns, also used to build the enum() in the
 # CREATE TABLE statements in checkDatabase(), in order defined here
@@ -298,7 +300,7 @@ if ($reports_source == TS_IMAP) {
 		print "using ssl without verify servercert.\n" if $debug;
 		$socketargs = [ SSL_verify_mode => SSL_VERIFY_NONE ];
 	}
-  
+
 	print "connection to $imapserver with Ssl => $imapssl, User => $imapuser, Ignoresizeerrors => $imapignoreerror\n" if $debug;
 
 	# Setup connection to IMAP server.
@@ -344,11 +346,14 @@ if ($reports_source == TS_IMAP) {
 
 		# Loop through IMAP messages.
 		foreach my $msg (@msgs) {
+			my $filecontent;
+			my $data_type;
 
-			my $processResult = processXML(TS_MESSAGE_FILE, $imap->message_string($msg), "IMAP message with UID #".$msg);
+			($filecontent, $data_type) = &getDATAFromMessage($imap->message_string($msg));
+			my $processResult = processDATA(TS_MESSAGE_FILE, $filecontent, $msg, "IMAP message with UID #");
 			$processedReport++;
 			if ($processResult & 4) {
-				# processXML returned a value with database error bit enabled, do nothing at all!
+				# processDATA returns a value with database error bit enabled, do nothing at all!
 				if ($imapmovefoldererr) {
 					# if we can, move to error folder
 					moveToImapFolder($imap, $msg, $imapmovefoldererr);
@@ -357,19 +362,19 @@ if ($reports_source == TS_IMAP) {
 					next;
 				}
 			} elsif ($processResult & 2) {
-				# processXML return a value with delete bit enabled.
+				# processDATAprocessDATA returns a value with delete bit enabled.
 				$imap->delete_message($msg)
 				or warn "$scriptname: Could not delete IMAP message. [$@]\n";
 			} elsif ($imapmovefolder) {
 				if ($processResult & 1 || !$imapmovefoldererr) {
-					# processXML processed the XML OK, or it failed and there is no error imap folder
+					# processDATA processed the XML OK, or it failed and there is no error imap folder
 					moveToImapFolder($imap, $msg, $imapmovefolder);
 				} elsif ($imapmovefoldererr) {
-					# processXML failed and error folder set
+					# processDATA failed and error folder set
 					moveToImapFolder($imap, $msg, $imapmovefoldererr);
 				}
 			} elsif ($imapmovefoldererr && !($processResult & 1)) {
-				# processXML failed, error imap folder set, but imapmovefolder unset. An unlikely setup, but still...
+				# processDATA failed, error imap folder set, but imapmovefolder unset. An unlikely setup, but still...
 				moveToImapFolder($imap, $msg, $imapmovefoldererr);
 			}
 		}
@@ -383,9 +388,18 @@ if ($reports_source == TS_IMAP) {
 	$imap->logout();
 	if ( $debug || $processInfo ) { print "$scriptname: Processed $processedReport emails.\n"; }
 
-} else { # TS_MESSAGE_FILE or TS_XML_FILE or TS_MBOX_FILE
+} else { # TS_MBOX_FILE, TS_ZIP_FILE, TS_MESSAGE_FILE or TS_XML_FILE
 
 	my $counts = 0;
+# mimetypes test routine
+# 	foreach my $a (@ARGV) {
+# 		my @file_list = glob($a);
+# 		foreach my $f (@file_list) {
+# 			my $mtype = mimetype($f);
+# 			print "File: $f MType: $mtype\n";
+# 		}
+# }
+
 	foreach my $a (@ARGV) {
 		# Linux bash supports wildcard expansion BEFORE the script is
 		# called, so here we only see a list of files. Other OS behave
@@ -395,17 +409,18 @@ if ($reports_source == TS_IMAP) {
 
 		foreach my $f (@file_list) {
 			my $filecontent;
+			my $data_type = "";
 
 			if ($reports_source == TS_MBOX_FILE) {
 				my $parser = Mail::Mbox::MessageParser->new({"file_name" => $f, "debug" => $debug, "enable_cache" => 0});
 				my $num = 0;
-
 				do {
 					$num++;
 					$filecontent = $parser->read_next_email();
 					if (defined($filecontent)) {
-						if (processXML(TS_MESSAGE_FILE, $filecontent, "message #$num of mbox file <$f>") & 2) {
-							# processXML return a value with delete bit enabled
+						($filecontent, $data_type) = &getDATAFromMessage($filecontent);
+						if (processDATA(TS_MESSAGE_FILE, $filecontent, $f, "message #$num of mbox file <$f>") & 2) {
+							# processDATAprocessDATA returns a value with delete bit enabled
 							warn "$scriptname: Removing message #$num from mbox file <$f> is not yet supported.\n";
 						}
 						$counts++;
@@ -414,34 +429,35 @@ if ($reports_source == TS_IMAP) {
 
 			} elsif ($reports_source == TS_ZIP_FILE) {
 				# filecontent is zip file
-				$filecontent = getXMLFromZip($f);
-				if (processXML(TS_ZIP_FILE, $filecontent, "xml file <$f>") & 2) {
-					# processXML return a value with delete bit enabled
+				($filecontent, $data_type) = &getDATAFromZip($f);
+				if (processDATA(TS_ZIP_FILE, $filecontent, $f, "$data_type file ") & 2) {
+					# processDATAprocessDATA returns a value with delete bit enabled
 					unlink($f);
 				}
 				$counts++;
 			} elsif (open(FILE, "<", $f)) {
 
-				$filecontent = join("", <FILE>);
-				close FILE;
-
 				if ($reports_source == TS_MESSAGE_FILE) {
 					# filecontent is a mime message with zip or xml part
-					if (processXML(TS_MESSAGE_FILE, $filecontent, "message file <$f>") & 2) {
-						# processXML return a value with delete bit enabled
+					$filecontent = join("", <FILE>);
+					($filecontent, $data_type) = &getDATAFromMessage($filecontent);
+					if (processDATA(TS_MESSAGE_FILE, $filecontent, $f, "$data_type file ") & 2) {
+						# processDATAprocessDATA returns a value with delete bit enabled
 						unlink($f);
 					}
 					$counts++;
 				} elsif ($reports_source == TS_XML_FILE) {
 					# filecontent is xml file
-					if (processXML(TS_XML_FILE, $filecontent, "xml file <$f>") & 2) {
-						# processXML return a value with delete bit enabled
+					($filecontent, $data_type) = &getDATAFromFile($f);
+					if (processDATA(TS_XML_FILE, $filecontent, $f, "$data_type file ") & 2) {
+						# processDATAprocessDATA returns a value with delete bit enabled
 						unlink($f);
 					}
 					$counts++;
 				} else {
 					warn "$scriptname: Unknown reports_source <$reports_source> for file <$f>. Skipped.\n";
 				}
+				close FILE;
 
 			} else {
 				warn "$scriptname: Could not open file <$f>: $!. Skipped.\n";
@@ -488,13 +504,13 @@ sub moveToImapFolder {
 	}
 }
 
-sub processXML {
-	my ($type, $filecontent, $f) = (@_);
+sub processDATA {
+	my ($type, $filecontent, $f, $data_type) = (@_);
 
 	if ($debug) {
 		print "\n";
 		print "----------------------------------------------------------------\n";
-		print "Processing $f \n";
+		print "Processing $data_type $f \n";
 		print "----------------------------------------------------------------\n";
 		print "Type: $type\n";
 		print "FileContent: $filecontent\n";
@@ -502,14 +518,19 @@ sub processXML {
 		print "----------------------------------------------------------------\n";
 	}
 
-	my $xml; #TS_XML_FILE or TS_MESSAGE_FILE
-	if ($type == TS_MESSAGE_FILE) {$xml = getXMLFromMessage($filecontent);}
-	elsif ($type == TS_ZIP_FILE) {$xml = $filecontent;}
-	else {$xml = getXMLFromXMLString($filecontent);}
+	# my $data; #TS_XML_FILE or TS_MESSAGE_FILE
+	# if ($type == TS_MESSAGE_FILE) {
+	# 	# ($data, $data_type) = &getDATAFromMessage($filecontent);
+	# 	$data = $filecontent;
+	# } elsif ($type == TS_ZIP_FILE) {
+	# 	$data = $filecontent;
+	# } else { #TS_
+	# 	$data = $filecontent;
+	# }
 
-	# If !$xml, the file/mail is probably not a DMARC report.
+	# If !$filecontent, the file/mail is probably not a DMARC report.
 	# So do not storeXMLInDatabase.
-	if ($xml && storeXMLInDatabase($xml) <= 0) {
+	if ($filecontent && storeDATAInDatabase($filecontent) <= 0) {
 		# If storeXMLInDatabase returns false, there was some sort
 		# of database storage failure and we MUST NOT delete the
 		# file, because it has not been pushed into the database.
@@ -520,8 +541,8 @@ sub processXML {
 
 	# Delete processed message, if the --delete option
 	# is given. Failed reports are only deleted, if delete_failed is given.
-	if ($delete_reports && ($xml || $delete_failed)) {
-		if ($xml) {
+	if ($delete_reports && ($filecontent || $delete_failed)) {
+		if ($filecontent) {
 			print "Removing after report has been processed.\n" if $debug;
 			return 3; #xml ok (1), delete file (2)
 		} else {
@@ -535,7 +556,7 @@ sub processXML {
 		}
 	}
 
-	if ($xml) {
+	if ($filecontent) {
 		return 1;
 	} else {
 		warn "$scriptname: The $f does not seem to contain a valid DMARC report. Skipped.\n";
@@ -546,12 +567,12 @@ sub processXML {
 
 ################################################################################
 
-# Walk through a mime message and return a reference to the XML data containing
-# the fields of the first ZIPed XML file embedded into the message. The XML
+# Walk through a mime message and return a reference to the data containing
+# the fields of the first ZIPed file embedded into the message. The data
 # itself is not checked to be a valid DMARC report.
-sub getXMLFromMessage {
+sub getDATAFromMessage {
 	my ($message) = (@_);
-	
+
 	# fixup type in trustwave SEG mails
         $message =~ s/ContentType:/Content-Type:/;
 
@@ -580,7 +601,7 @@ sub getXMLFromMessage {
 
 		$location = $body->path;
 
-	} elsif (lc $mtype eq "application/gzip" or lc $mtype eq "application/x-gzip") {
+		} elsif (lc $mtype eq "application/gzip" or lc $mtype eq "application/x-gzip" or lc $mtype eq "application/tlsrpt+gzip") {
 		if ($debug) {
 			print "This is a GZIP file \n";
 		}
@@ -588,7 +609,7 @@ sub getXMLFromMessage {
 		$location = $body->path;
 		$isgzip = 1;
 
-	} elsif (lc $mtype =~ "multipart/") {
+	} elsif (lc $mtype eq "multipart/mixed" or lc $mtype eq "multipart/report") {
 		# At the moment, nease.net messages are multi-part, so we need
 		# to breakdown the attachments and find the zip.
 		if ($debug) {
@@ -601,7 +622,7 @@ sub getXMLFromMessage {
 			my $part = $ent->parts($i);
 
 			# Find a zip file to work on...
-			if(lc $part->mime_type eq "application/gzip" or lc $part->mime_type eq "application/x-gzip") {
+			if(lc $part->mime_type eq "application/gzip" or lc $part->mime_type eq "application/x-gzip" or lc $part->mime_type eq "application/tlsrpt+gzip") {
 				$location = $ent->parts($i)->{ME_Bodyhandle}->{MB_Path};
 				$isgzip = 1;
 				print "$location\n" if $debug;
@@ -639,43 +660,60 @@ sub getXMLFromMessage {
 		}
 	}
 
+	# Set up a default return value, in case something goes wrong
+	my @ret_arr = ("", "");
 
-	# If a ZIP has been found, extract XML and parse it.
-	my $xml;
+	# If a ZIP has been found, extract data and parse it.
 	if(defined($location)) {
 		if ($debug) {
 			print "body is in " . $location . "\n";
 		}
 
-		# Open the zip file and process the XML contained inside.
+		# Open the zip file and process the data contained inside.
 		my $unzip = "";
 		if($isgzip) {
-			open(XML, "<:gzip", $location)
+			open(DATA, "<:gzip", $location)
 			or $unzip = "ungzip";
 		} else {
-			open(XML, "-|", "unzip", "-p", $location)
+			open(DATA, "-|", "unzip", "-p", $location)
 			or $unzip = "unzip"; # Will never happen.
 
 			# Sadly unzip -p never failes, but we can check if the
 			# filehandle points to an empty file and pretend it did
 			# not open/failed.
-			if (eof XML) {
+			if (eof DATA) {
 				$unzip = "unzip";
 			}
 		}
 
-		# Read XML if possible (if open)
+		# Read data if possible (if open)
 		if ($unzip eq "") {
-			$xml = getXMLFromXMLString(join("", <XML>));
-			if (!$xml) {
-				warn "$scriptname: Subject: $subj\n:";
-				warn "$scriptname: The XML found in ZIP file (temp. location: <$location>) does not seem to be valid XML! \n";
+			my $report_data = "";
+			my $raw_data = join("", <DATA>);
+			close DATA;
+			$report_data = getXMLFromXMLString($raw_data);
+			if ($report_data) {
+				@ret_arr = ($report_data, "xml");
+			} else {
+				if ($debug) {
+					warn "$scriptname: Subject: $subj\n:";
+					warn "$scriptname: The data found in ZIP file (temp. location: <$location>) does not seem to be valid XML! Let's try JSON...\n";
+				}
+
+				$report_data = getJSONFromJSONString($raw_data);
+				if ($report_data) {
+					if ($debug) {
+						warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
+					}
+					@ret_arr = ($report_data, "json");
+				} elsif ($debug) {
+					warn "$scriptname: The data found in ZIP file (temp. location: <$location>) does not seem to be valid JSON either! \n";
+				}
 			}
-			close XML;
 		} else {
 			warn "$scriptname: Subject: $subj\n:";
 			warn "$scriptname: Failed to $unzip ZIP file (temp. location: <$location>)! \n";
-			close XML;
+			close DATA;
 		}
 	} else {
 		warn "$scriptname: Subject: $subj\n:";
@@ -684,12 +722,13 @@ sub getXMLFromMessage {
 
 	if($body) {$body->purge;}
 	if($ent) {$ent->purge;}
-	return $xml;
+
+	return @ret_arr;
 }
 
 ################################################################################
 
-sub getXMLFromZip {
+sub getDATAFromZip {
 	my $filename = $_[0];
 	my $mtype = mimetype($filename);
 
@@ -715,42 +754,122 @@ sub getXMLFromZip {
 		}
 	}
 
-	# If a ZIP has been found, extract XML and parse it.
-	my $xml;
+	# Set up a default return value, in case something goes wrong
+	my @ret_arr = ("", "");
+
+	# If a ZIP has been found, extract DATA and parse it.
 	if(defined($filename)) {
-		# Open the zip file and process the XML contained inside.
+		# Open the zip file and process the DATA contained inside.
 		my $unzip = "";
 		if($isgzip) {
-			open(XML, "<:gzip", $filename)
+			open(DATA, "<:gzip", $filename)
 			or $unzip = "ungzip";
 		} else {
-			open(XML, "-|", "unzip", "-p", $filename)
+			open(DATA, "-|", "unzip", "-p", $filename)
 			or $unzip = "unzip"; # Will never happen.
 
-			# Sadly unzip -p never failes, but we can check if the
+			# Sadly unzip -p never fails, but we can check if the
 			# filehandle points to an empty file and pretend it did
 			# not open/failed.
-			if (eof XML) {
+			if (eof DATA) {
 				$unzip = "unzip";
 			}
 		}
 
-		# Read XML if possible (if open)
+		# Read DATA if possible (if open)
 		if ($unzip eq "") {
-			$xml = getXMLFromXMLString(join("", <XML>));
-			if (!$xml) {
-				warn "$scriptname: The XML found in ZIP file (<$filename>) does not seem to be valid XML! \n";
+			my $report_data = "";
+			my $raw_data = join("", <DATA>);
+			close DATA;
+			$report_data = getXMLFromXMLString($raw_data);
+			if ($report_data) {
+				@ret_arr = ($report_data, "xml");
+			} else {
+				if ($debug) {
+					warn "$scriptname: The data found in ZIP file does not seem to be valid XML! Let's try JSON... \n";
+				}
+
+				$report_data = getJSONFromJSONString($raw_data);
+				if ($report_data) {
+					if ($debug) {
+						warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
+					}
+					@ret_arr = ($report_data, "json");
+				} elsif ($debug) {
+					warn "$scriptname: The data found in ZIP file does not seem to be valid JSON, either! \n";
+				}
 			}
-			close XML;
 		} else {
 			warn "$scriptname: Failed to $unzip ZIP file (<$filename>)! \n";
-			close XML;
+			close DATA;
 		}
 	} else {
 		warn "$scriptname: Could not find an <$filename>! \n";
 	}
 
-	return $xml;
+	return @ret_arr;
+}
+
+################################################################################
+
+sub getDATAFromFile {
+	my $filename = $_[0];
+	my $mtype = mimetype($filename);
+
+	if ($debug) {
+		print "Filename: $filename, MimeType: $mtype\n";
+	}
+
+	# my $isgzip = 0;
+
+	if(lc $mtype eq "application/xml") {
+		if ($debug) {
+			print "This is an XML file \n";
+		}
+	} elsif (lc $mtype eq "application/json") {
+		if ($debug) {
+			print "This is a JSON file \n";
+		}
+		# $isgzip = 1;
+	} else {
+		if ($debug) {
+			print "This is not an archive file \n";
+		}
+	}
+
+	# Set up a default return value, in case something goes wrong
+	my @ret_arr = ("", "");
+
+	# If a XML or JSON has been found, extract DATA and parse it.
+	if(defined($filename)) {
+		# Read DATA if possible (if open)
+		open(DATA, "<", $filename);
+		my $report_data = "";
+		my $raw_data = join("", <DATA>);
+		close DATA;
+		$report_data = getXMLFromXMLString($raw_data);
+		if ($report_data) {
+			@ret_arr = ($report_data, "xml");
+		} else {
+			if ($debug) {
+				warn "$scriptname: The data found in ZIP file does not seem to be valid XML! Let's try JSON... \n";
+			}
+
+			$report_data = getJSONFromJSONString($raw_data);
+			if ($report_data) {
+				if ($debug) {
+					warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
+				}
+				@ret_arr = ($report_data, "json");
+			} elsif ($debug) {
+					warn "$scriptname: The data found in ZIP file does not seem to be valid JSON, either! \n";
+			}
+		}
+	} else {
+		warn "$scriptname: Could not find an <$filename>! \n";
+	}
+
+	return @ret_arr;
 }
 
 ################################################################################
@@ -767,6 +886,38 @@ sub getXMLFromXMLString {
 	} or do {
 		return undef;
 	}
+}
+
+
+################################################################################
+
+sub getJSONFromJSONString {
+	my $raw_json = $_[0];
+
+	eval {
+		my $ref = decode_json($raw_json);
+		$ref->{'raw_json'} = $raw_json;
+
+		return $ref;
+	} or do {
+		return undef;
+	}
+}
+
+
+################################################################################
+
+sub storeDATAInDatabase {
+	my $raw_data = $_[0];
+
+	my $database_return_value = 0;
+
+	if ( $raw_data->{'report_metadata'}->{'org_name'} ) {
+		$database_return_value = storeXMLInDatabase($raw_data);
+	} else {
+		$database_return_value = storeJSONInDatabase($raw_data);
+	}
+	return $database_return_value;
 }
 
 
@@ -789,7 +940,7 @@ sub storeXMLInDatabase {
         my $policy_p = undef;
         my $policy_sp = undef;
         my $policy_pct = undef;
- 
+
         if (ref $xml->{'policy_published'} eq "HASH") {
                 $domain =  $xml->{'policy_published'}->{'domain'};
                 $policy_adkim = $xml->{'policy_published'}->{'adkim'};
@@ -838,10 +989,43 @@ sub storeXMLInDatabase {
 		}
 	}
 
-	my $sql = qq{INSERT INTO report(mindate,maxdate,domain,org,reportid,email,extra_contact_info,policy_adkim, policy_aspf, policy_p, policy_sp, policy_pct, raw_xml)
-			VALUES($dbx{epoch_to_timestamp_fn}(?),$dbx{epoch_to_timestamp_fn}(?),?,?,?,?,?,?,?,?,?,?,?)};
+	my $sql = qq{
+		INSERT INTO report
+		(
+			mindate,
+			maxdate,
+			domain,
+			org,
+			reportid,
+			email,
+			extra_contact_info,
+			policy_adkim,
+			policy_aspf,
+			policy_p,
+			policy_sp,
+			policy_pct,
+			raw_xml
+		)
+		VALUES
+		(
+			$dbx{epoch_to_timestamp_fn}(?),
+			$dbx{epoch_to_timestamp_fn}(?),
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?
+		)
+	};
+
 	my $storexml = $xml->{'raw_xml'};
-	if ($compress_xml) {
+	if ($raw_data_compress) {
 		my $gzipdata;
 		if(!gzip(\$storexml => \$gzipdata)) {
 			warn "$scriptname: $org: $id: Cannot add gzip XML to database ($GzipError). Skipped.\n";
@@ -852,7 +1036,7 @@ sub storeXMLInDatabase {
 			$storexml = encode_base64($gzipdata, "");
 		}
 	}
-	if (length($storexml) > $maxsize_xml) {
+	if (length($storexml) > $raw_data_max_size) {
 		warn "$scriptname: $org: $id: Skipping storage of large XML (".length($storexml)." bytes) as defined in config file.\n";
 		$storexml = "";
 	}
@@ -867,7 +1051,9 @@ sub storeXMLInDatabase {
 	if ($debug){
 		print " serial $serial \n";
 	}
-	sub dorow($$$$) {
+
+	################################################################################
+	sub do_xml_row($$$$) {
 		my ($serial,$recp,$org,$id) = @_;
 		my %r = %$recp;
 
@@ -999,8 +1185,34 @@ sub storeXMLInDatabase {
 			return 0;
 		}
 
-		$dbh->do(qq{INSERT INTO rptrecord(serial,$iptype,rcount,disposition,spf_align,dkim_align,reason,dkimdomain,dkimresult,spfdomain,spfresult,identifier_hfrom)
-			VALUES(?,$ipval,?,?,?,?,?,?,?,?,?,?)},undef,$serial,$count,$disp,$spf_align,$dkim_align,$reason,$dkim,$dkimresult,$spf,$spfresult,$identifier_hfrom);
+		$dbh->do(qq{
+			INSERT INTO rptrecord
+			(
+				serial,
+				$iptype,
+				rcount,
+				disposition,
+				spf_align,
+				dkim_align,
+				reason,
+				dkimdomain,
+				dkimresult,
+				spfdomain,
+				spfresult,
+				identifier_hfrom)
+			VALUES(?,$ipval,?,?,?,?,?,?,?,?,?,?)},
+				undef,
+				$serial,
+				$count,
+				$disp,
+				$spf_align,
+				$dkim_align,
+				$reason,
+				$dkim,
+				$dkimresult,
+				$spf,
+				$spfresult,
+				$identifier_hfrom);
 		if ($dbh->errstr) {
 			warn "$scriptname: $org: $id: Cannot add report data to database. Skipped.\n";
 			rollback($dbh);
@@ -1008,19 +1220,21 @@ sub storeXMLInDatabase {
 		}
 		return 1;
 	}
+	# End do_xml_row()
+	################################################################################
 
 	my $res = 1;
 	if(ref $record eq "HASH") {
 		if ($debug){
 			print "single record\n";
 		}
-		$res = -1 if !dorow($serial,$record,$org,$id);
+		$res = -1 if !do_xml_row($serial,$record,$org,$id);
 	} elsif(ref $record eq "ARRAY") {
 		if ($debug){
 			print "multi record\n";
 		}
 		foreach my $row (@$record) {
-			$res = -1 if !dorow($serial,$row,$org,$id);
+			$res = -1 if !do_xml_row($serial,$row,$org,$id);
 		}
 	} else {
 		warn "$scriptname: $org: $id: mystery type " . ref($record) . "\n";
@@ -1062,6 +1276,247 @@ sub rollback {
 		}
 	}
 }
+
+################################################################################
+
+# Extract fields from the JSON report data hash and store them into the database.
+# return 1 when ok, 0, for serious error and -1 for minor errors
+sub storeJSONInDatabase {
+	my $json = $_[0]; # $json is a reference to the json data
+
+	my $from = $json->{'date-range'}->{'start-datetime'};
+	my $to = $json->{'date-range'}->{'end-datetime'};
+	my $org = $json->{'organization-name'};
+	my $id = $json->{'report-id'};
+	my $contact = $json->{'contact-info'};
+	my $domain =  $json->{'policies'}[0]->{'policy'}->{'policy-domain'};
+	my $policy_type =  $json->{'policies'}[0]->{'policy'}->{'policy-type'};
+	my $policy_string = "";
+	if($json->{'policies'}[0]->{'policy'}->{'policy-string'}) {
+		$policy_string = join("\n",@{$json->{'policies'}[0]->{'policy'}->{'policy-string'}});
+	}
+	my $summary_failure = $json->{'policies'}[0]->{'summary'}->{'total-failure-session-count'};
+	my $summary_successful = $json->{'policies'}[0]->{'summary'}->{'total-successful-session-count'};
+
+	#Delete "Z" at the end of timestamp
+	$from =~ tr/Z//d;
+	$to =~ tr/Z//d;
+
+	# see if already stored
+	my $sth = $dbh->prepare(qq{SELECT org, serial FROM tls_report WHERE reportid=?});
+	$sth->execute($id);
+	while ( my ($xorg,$sid) = $sth->fetchrow_array() )
+	{
+		if ($reports_replace) {
+			# $sid is the serial of a tls report with reportid=$id
+			# Remove this $sid from tls_report table, but
+			# try to continue on failure rather than skipping.
+			print "Replacing $xorg $id.\n";
+			$dbh->do(qq{DELETE from tls_report WHERE serial=?}, undef, $sid);
+			if ($dbh->errstr) {
+				print "Cannot remove report from database (". $dbh->errstr ."). Try to continue.\n";
+			}
+		} else {
+			print "Already have $xorg $id, skipped\n";
+			# Do not store in DB, but return true, so the message can
+			# be moved out of the way, if configured to do so.
+			return 1;
+		}
+	}
+
+	my $sql = qq{
+		INSERT INTO tls_report
+		(
+			mindate,
+			maxdate,
+			org,
+			reportid,
+			contact,
+			domain,
+			policy_type,
+			policy_string,
+			summary_failure,
+			summary_successful,
+			raw_json
+		)
+		VALUES
+		(
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?
+		)
+	};
+
+	my $storejson = $json->{'raw_json'};
+	if ($raw_data_compress) {
+		my $gzipdata;
+		if(!gzip(\$storejson => \$gzipdata)) {
+			print "Cannot add gzip JSON to database ($GzipError). Skipped.\n";
+			return 0;
+			$storejson = "";
+		} else {
+			$storejson = encode_base64($gzipdata, "");
+		}
+	}
+	if (length($storejson) > $raw_data_max_size) {
+		print "Skipping storage of large JSON (".length($storejson)." bytes) as defined in config file.\n";
+		$storejson = "";
+	}
+	$dbh->do($sql, undef, $from, $to, $org, $id, $contact, $domain, $policy_type, $policy_string, $summary_failure, $summary_successful, $storejson);
+	if ($dbh->errstr) {
+		print "Cannot add report to database (". $dbh->errstr ."). Skipped.\n";
+		return 0;
+	}
+
+	my $serial = $dbh->last_insert_id(undef, undef, 'tls_report', undef);
+	if ($debug){
+		print " serial $serial ";
+	}
+
+	################################################################################
+	sub do_json_row($$$$) {
+		my ($serial,$recp,$org,$id) = @_;
+		my %r = %$recp;
+
+		my $result_type = $r{'result-type'};
+		my $receiving_mx_hostname = $r{'receiving-mx-hostname'};
+		my $receiving_mx_helo = $r{'receiving-mx-helo'};
+		my $failed_session_count = $r{'failed-session-count'};
+		my $additional_information = $r{'additional-info-uri'};
+		my $failure_reason_code = $r{'failure-reason-code'};
+
+		# What type of IP address?
+		# This should be turned into a function
+		my ($nip, $iptype, $ipval);
+
+		my $sending_mta_ip = $r{'sending-mta-ip'};
+		my $sending_mta_ipval = 0;
+		my $sending_mta_iptype = "ip";
+		if (length $sending_mta_ip){
+			if ($debug) {
+				print "ip=$sending_mta_ip\n";
+			}
+			if($nip = inet_pton(AF_INET, $sending_mta_ip)) {
+				$sending_mta_ipval = unpack "N", $nip;
+				$sending_mta_iptype = "ip";
+			} elsif($nip = inet_pton(AF_INET6, $sending_mta_ip)) {
+				$sending_mta_ipval = $dbx{to_hex_string}($nip);
+				$sending_mta_iptype = "ip6";
+			} else {
+				warn "$scriptname: $org: $id: ??? mystery ip $sending_mta_ip\n";
+				rollback($dbh);
+				return 0;
+			}
+		}
+
+		# What type of IP address?
+		# This should be turned into a function
+		my $receiving_ip = $r{'receiving-ip'};
+		my $receiving_ipval = 0;
+		my $receiving_iptype = "ip";
+		if (length $receiving_ip){
+			if ($debug) {
+				print "ip=$receiving_ip\n";
+			}
+			if($nip = inet_pton(AF_INET, $receiving_ip)) {
+				$receiving_ipval = unpack "N", $nip;
+				$receiving_iptype = "ip";
+			} elsif($nip = inet_pton(AF_INET6, $receiving_ip)) {
+				$receiving_ipval = $dbx{to_hex_string}($nip);
+				$receiving_iptype = "ip6";
+			} else {
+				warn "$scriptname: $org: $id: ??? mystery ip $receiving_ip\n";
+				rollback($dbh);
+				return 0;
+			}
+		}
+
+		$dbh->do(qq{
+			INSERT INTO tls_rptrecord
+			(
+				serial,
+				sending_mta_$sending_mta_iptype,
+				receiving_$receiving_iptype,
+				result_type,
+				receiving_mx_hostname,
+				receiving_mx_helo,
+				failed_session_count,
+				additional_information,
+				failure_reason_code
+			)
+			VALUES(?,$sending_mta_ipval,$receiving_ipval,?,?,?,?,?,?)},
+			undef,
+			$serial,
+			$result_type,
+			$receiving_mx_hostname,
+			$receiving_mx_helo,
+			$failed_session_count,
+			$additional_information,
+			$failure_reason_code);
+		if ($dbh->errstr) {
+			warn "$scriptname: $org: $id: Cannot add report data to database. Skipped.\n";
+			rollback($dbh);
+			return 0;
+		}
+		return 1;
+
+	}
+	# End do_json_row()
+	################################################################################
+
+	my $failure_details = $json->{'policies'}[0]->{'failure-details'};
+	my $res = 1;
+	if ( ! defined($failure_details) ) {
+		if ($debug) {
+			warn "$scriptname: $org: $id: No failure details in report.\n";
+		}
+		# return 0;
+	} elsif (ref $failure_details eq "HASH") {
+		if ($debug){
+			print "single record\n";
+		}
+		$res = -1 if !do_json_row($serial,$failure_details,$org,$id);
+	} elsif(ref $failure_details eq "ARRAY") {
+		if ($debug){
+			print "multi record\n";
+		}
+		foreach my $row (@$failure_details) {
+			$res = -1 if !do_json_row($serial,$row,$org,$id);
+		}
+	} else {
+		warn "$scriptname: $org: $id: mystery type " . ref($failure_details) . "\n";
+	}
+
+	if ($debug && $res <= 0) {
+		print "Raw JSON: $json->{raw_json}\n";
+	}
+
+	if ($res <= 0) {
+		if ($db_tx_support) {
+			warn "$scriptname: $org: $id: Cannot add records to tls_rptrecord. Rolling back DB transaction.\n";
+			rollback($dbh);
+		} else {
+			warn "$scriptname: $org: $id: errors while adding to rptrecord, serial $serial records likely obsolete.\n";
+		}
+	} else {
+		if ($db_tx_support) {
+			$dbh->commit;
+			if ($dbh->errstr) {
+				warn "$scriptname: $org: $id: Cannot commit transaction.\n";
+			}
+		}
+	}
+	return $res;
+}
+
 
 ################################################################################
 

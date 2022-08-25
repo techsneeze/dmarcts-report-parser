@@ -660,6 +660,8 @@ sub getDATAFromMessage {
 		}
 	}
 
+	# Set up a default return value, in case something goes wrong
+	my @ret_arr = ("", "");
 
 	# If a ZIP has been found, extract data and parse it.
 	if(defined($location)) {
@@ -690,25 +692,23 @@ sub getDATAFromMessage {
 			my $raw_data = join("", <DATA>);
 			close DATA;
 			$report_data = getXMLFromXMLString($raw_data);
-			if (!$report_data) {
+			if ($report_data) {
+				@ret_arr = ($report_data, "xml");
+			} else {
 				if ($debug) {
 					warn "$scriptname: Subject: $subj\n:";
 					warn "$scriptname: The data found in ZIP file (temp. location: <$location>) does not seem to be valid XML! Let's try JSON...\n";
 				}
-			} else {
-					return ($report_data, "xml");
-			}
-			$report_data = getJSONFromJSONString($raw_data);
-			if (!$report_data) {
-				if ($debug) {
-					warn "$scriptname: Subject: $subj\n:";
+
+				$report_data = getJSONFromJSONString($raw_data);
+				if ($report_data) {
+					if ($debug) {
+						warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
+					}
+					@ret_arr = ($report_data, "json");
+				} elsif ($debug) {
 					warn "$scriptname: The data found in ZIP file (temp. location: <$location>) does not seem to be valid JSON either! \n";
 				}
-			} else {
-				if ($debug) {
-					warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
-				}
-				return ($report_data, "json");
 			}
 		} else {
 			warn "$scriptname: Subject: $subj\n:";
@@ -722,6 +722,8 @@ sub getDATAFromMessage {
 
 	if($body) {$body->purge;}
 	if($ent) {$ent->purge;}
+
+	return @ret_arr;
 }
 
 ################################################################################
@@ -752,6 +754,9 @@ sub getDATAFromZip {
 		}
 	}
 
+	# Set up a default return value, in case something goes wrong
+	my @ret_arr = ("", "");
+
 	# If a ZIP has been found, extract DATA and parse it.
 	if(defined($filename)) {
 		# Open the zip file and process the DATA contained inside.
@@ -777,23 +782,22 @@ sub getDATAFromZip {
 			my $raw_data = join("", <DATA>);
 			close DATA;
 			$report_data = getXMLFromXMLString($raw_data);
-			if (!$report_data) {
+			if ($report_data) {
+				@ret_arr = ($report_data, "xml");
+			} else {
 				if ($debug) {
 					warn "$scriptname: The data found in ZIP file does not seem to be valid XML! Let's try JSON... \n";
 				}
-			} else {
-				return ($report_data, "xml");
-			}
-			$report_data = getJSONFromJSONString($raw_data);
-			if (!$report_data) {
-				if ($debug) {
+
+				$report_data = getJSONFromJSONString($raw_data);
+				if ($report_data) {
+					if ($debug) {
+						warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
+					}
+					@ret_arr = ($report_data, "json");
+				} elsif ($debug) {
 					warn "$scriptname: The data found in ZIP file does not seem to be valid JSON, either! \n";
 				}
-			} else {
-				if ($debug) {
-					warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
-				}
-				return ($report_data, "json");
 			}
 		} else {
 			warn "$scriptname: Failed to $unzip ZIP file (<$filename>)! \n";
@@ -803,6 +807,7 @@ sub getDATAFromZip {
 		warn "$scriptname: Could not find an <$filename>! \n";
 	}
 
+	return @ret_arr;
 }
 
 ################################################################################
@@ -832,41 +837,39 @@ sub getDATAFromFile {
 		}
 	}
 
+	# Set up a default return value, in case something goes wrong
+	my @ret_arr = ("", "");
+
 	# If a XML or JSON has been found, extract DATA and parse it.
 	if(defined($filename)) {
 		# Read DATA if possible (if open)
-		# if ($unzip eq "") {
-			open(DATA, "<", $filename);
-			my $report_data = "";
-			my $raw_data = join("", <DATA>);
-			close DATA;
-			$report_data = getXMLFromXMLString($raw_data);
-			if (!$report_data) {
-				if ($debug) {
-					warn "$scriptname: The data found in ZIP file does not seem to be valid XML! Let's try JSON... \n";
-				}
-			} else {
-				return ($report_data, "xml");
+		open(DATA, "<", $filename);
+		my $report_data = "";
+		my $raw_data = join("", <DATA>);
+		close DATA;
+		$report_data = getXMLFromXMLString($raw_data);
+		if ($report_data) {
+			@ret_arr = ($report_data, "xml");
+		} else {
+			if ($debug) {
+				warn "$scriptname: The data found in ZIP file does not seem to be valid XML! Let's try JSON... \n";
 			}
+
 			$report_data = getJSONFromJSONString($raw_data);
-			if (!$report_data) {
-				if ($debug) {
-					warn "$scriptname: The data found in ZIP file does not seem to be valid JSON, either! \n";
-				}
-			} else {
+			if ($report_data) {
 				if ($debug) {
 					warn "$scriptname: The data found in ZIP file seems to be valid JSON!\n";
 				}
-				return ($report_data, "json");
+				@ret_arr = ($report_data, "json");
+			} elsif ($debug) {
+					warn "$scriptname: The data found in ZIP file does not seem to be valid JSON, either! \n";
 			}
-		# } else {
-		# 	warn "$scriptname: Failed to $unzip ZIP file (<$filename>)! \n";
-		# 	close DATA;
-		# }
+		}
 	} else {
 		warn "$scriptname: Could not find an <$filename>! \n";
 	}
 
+	return @ret_arr;
 }
 
 ################################################################################

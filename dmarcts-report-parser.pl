@@ -1472,7 +1472,9 @@ sub storeJSONInDatabase {
 	my $failure_details = $json->{'policies'}[0]->{'failure-details'};
 	my $res = 1;
 	if ( ! defined($failure_details) ) {
-		warn "$scriptname: $org: $id: No failure details in report.\n";
+		if ($debug) {
+			warn "$scriptname: $org: $id: No failure details in report.\n";
+		}
 		# return 0;
 	} elsif (ref $failure_details eq "HASH") {
 		if ($debug){

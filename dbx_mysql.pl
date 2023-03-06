@@ -26,7 +26,7 @@
 				"policy_pct"		, "tinyint"		, "unsigned",
 				"raw_xml"		, "mediumtext"		, "",
 				],
-			additional_definitions 		=> "PRIMARY KEY (serial), UNIQUE KEY domain (domain, reportid)",
+			additional_definitions 		=> "PRIMARY KEY (serial), UNIQUE KEY domain (domain, org, reportid)",
 			table_options			=> "ROW_FORMAT=COMPRESSED",
 			indexes				=> [],
 			},

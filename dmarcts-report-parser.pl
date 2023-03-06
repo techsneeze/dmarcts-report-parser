@@ -813,8 +813,8 @@ sub storeXMLInDatabase {
 	}
 
 	# see if already stored
-	my $sth = $dbh->prepare(qq{SELECT org, serial FROM report WHERE reportid=?});
-	$sth->execute($id);
+	my $sth = $dbh->prepare(qq{SELECT org, serial FROM report WHERE reportid=? AND org=? AND domain=?});
+	$sth->execute($id, $org, $domain);
 	while ( my ($xorg,$sid) = $sth->fetchrow_array() )
 	{
 		if ($reports_replace) {

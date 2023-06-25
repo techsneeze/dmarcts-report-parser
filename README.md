@@ -37,11 +37,23 @@ yum install perl-File-MimeInfo perl-Mail-IMAPClient perl-MIME-tools perl-XML-Sim
  perl-Socket6 perl-PerlIO-gzip unzip perl-Mail-Mbox-MessageParser
  ```
 Plus `perl-DBD-MySQL` for MySQL or `perl-DBD-Pg` for PostgreSQL.
-### on FreeBSD (FreeBSD 11.4):
+### on FreeBSD (FreeBSD 13.2):
 ```
 sudo pkg install p5-File-MimeInfo p5-Mail-IMAPClient p5-MIME-tools p5-XML-Simple p5-DBI p5-Socket6 p5-PerlIO-gzip p5-Mail-Mbox-MessageParser unzip
 ```
 Plus `p5-DBD-MySQL` for MySQL or `p5-DBD-Pg` for PostgreSQL.
+
+There is also a port in mail/dmarcts-report-parser that does all this and
+creates a periodic script that runs the IMAP pull daily:
+```
+sudo pkg install dmarcts-report-parser
+[create the database and IMAP users and edit /usr/local/etc/dmarcts-report-parser.conf]
+echo daily_dmarcts_report_parser_enable=yes >> /etc/periodic.conf
+# Test it
+dmarcts-report-parser.pl -i
+# Hide the passwords!
+chmod 600 /usr/local/etc/dmarcts-report-parser.conf
+```
  ### on macOS (macOS 10.13):
 ```
 brew install mysql shared-mime-info

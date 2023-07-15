@@ -316,7 +316,7 @@ if ($reports_source == TS_IMAP) {
 	# This connection is finished this way because of the tradgedy of exchange...
 	$imap->User($imapuser);
 	$imap->Password($imappass);
-	$imap->connect();
+	$imap->connect() or die "$scriptname: Could not connect: $@";
 
 	# Ignore Size Errors if we're using Exchange
 	$imap->Ignoresizeerrors($imapignoreerror);

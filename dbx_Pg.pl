@@ -29,7 +29,7 @@
 			additional_definitions 		=> "PRIMARY KEY (serial)",
 			table_options			=> "",
 			indexes				=> [
-				"CREATE UNIQUE INDEX report_uidx_domain ON report (domain, reportid);"
+				"CREATE UNIQUE INDEX report_uidx_domain ON report (domain, org, reportid);"
 				],
 			},
 		"rptrecord" => {

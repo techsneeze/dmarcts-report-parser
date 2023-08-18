@@ -57,24 +57,30 @@ use strict;
 use warnings;
 
 # Use these modules
+#use Data::Dumper;
+use DBI;
+use File::Basename ();
+use File::MimeInfo;
+use File::Slurper 'read_text';
+use File::stat;
 use Getopt::Long;
 use IO::Compress::Gzip qw(gzip $GzipError);
-#use Data::Dumper;
+use IO::Socket::SSL;
+#use IO::Socket::SSL 'debug3';
+use JSON;
+use LWP::UserAgent ();
 use Mail::IMAPClient;
 use Mail::Mbox::MessageParser;
 use MIME::Base64 qw(encode_base64);
 use MIME::Words qw(decode_mimewords);
 use MIME::Parser;
 use MIME::Parser::Filer;
-use XML::Simple;
-use DBI;
+use PerlIO::gzip;
 use Socket;
 use Socket6;
-use PerlIO::gzip;
-use File::Basename ();
-use File::MimeInfo;
-use IO::Socket::SSL;
-#use IO::Socket::SSL 'debug3';
+use Switch;
+use utf8;
+use XML::Simple;
 
 
 
@@ -120,6 +126,7 @@ sub show_usage {
 our ($debug, $delete_reports, $delete_failed, $reports_replace, $maxsize_xml, $compress_xml,
 	$dbtype, $dbname, $dbuser, $dbpass, $dbhost, $dbport, $db_tx_support,
   $imapserver, $imapport, $imapuser, $imappass, $imapignoreerror, $imapssl, $imaptls, $imapmovefolder,
+  $imapoauth, $imapoauth_variant, $entra_tenant_id, $entra_client_id, $entra_client_secret,
 	$imapmovefoldererr, $imapreadfolder, $imapopt, $tlsverify, $processInfo);
 
 # defaults
@@ -314,9 +321,22 @@ if ($reports_source == TS_IMAP) {
 	or die "$scriptname: IMAP Failure: $@";
 
 	# This connection is finished this way because of the tradgedy of exchange...
-	$imap->User($imapuser);
-	$imap->Password($imappass);
-	$imap->connect() or die "$scriptname: Could not connect: $@";
+	if ($imapoauth == 1) {
+		my $oauth_token;
+
+		switch($imapoauth_variant) {
+			case "O365" {
+				$oauth_token = getO365Token($entra_tenant_id, $entra_client_id, $entra_client_secret);
+			}
+		}
+
+		my $oauth_sign = encode_base64("user=". $imapuser ."\x01auth=Bearer ". $oauth_token ."\x01\x01", '');
+		$imap->authenticate('XOAUTH2', sub { return $oauth_sign }) or die "$scriptname: Auth error: ". $imap->LastError;
+	} else {
+		$imap->User($imapuser);
+		$imap->Password($imappass);
+		$imap->connect() or die "$scriptname: Could not connect: $@";
+	}
 
 	# Ignore Size Errors if we're using Exchange
 	$imap->Ignoresizeerrors($imapignoreerror);
@@ -1159,4 +1179,48 @@ sub db_column_info {
 		$columns{$column} = $db_info->{$column}{$dbx{column_info_type_col}};
 	}
 	return %columns;
+}
+
+sub getO365Token {
+	my $entra_tenant_id = $_[0];
+	my $entra_client_id = $_[1];
+	my $entra_client_secret = $_[2];
+	my $filename = "/tmp/exchange365token";
+
+	if (-e $filename) {
+		my $mod = stat($filename)->mtime;
+		my $val = JSON->new->utf8->decode(read_text($filename));
+
+		# Tokens are valid for one hour, after that it needs to be refreshed
+		if ($mod + int($val->{expires_in}) > time()) {
+			return $val->{access_token};
+		}
+	}
+
+	my $ua = LWP::UserAgent->new(timeout => 10);
+	$ua->env_proxy;
+
+	my $response = $ua->post(
+		"https://login.microsoftonline.com/" . $entra_tenant_id . "/oauth2/v2.0/token",
+		{
+			"grant_type" => "client_credentials",
+			"client_id" => $entra_client_id,
+			"client_secret" => $entra_client_secret,
+			"scope" => "https://outlook.office365.com/.default"
+		}
+	);
+
+	my $token = "";
+	if($response->is_success) {
+		my $body = $response->decoded_content;
+		$token = JSON->new->utf8->decode($body)->{access_token};
+
+		if ($token ne "") {
+			open (my $fh, '>', $filename) or return $token;
+			print $fh $body;
+			close $fh;
+		}
+	}
+	
+	return $token;
 }

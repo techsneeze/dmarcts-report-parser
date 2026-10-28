@@ -291,7 +291,7 @@ if ($reports_source == TS_IMAP) {
 			$imapopt = [ SSL_verify_mode => SSL_VERIFY_NONE ];
 		} else {
 			print "use tls with verify servercert.\n" if $debug;
-			$imapopt = [ SSL_verify_mode => SSL_VERIFY_PEER ];
+			$imapopt = [ SSL_verify_mode => SSL_VERIFY_PEER, SSL_verifycn_scheme => 'imap', SSL_verifycn_name => $imapserver, SSL_hostname => $imapserver ];
 		}
 	# The whole point of setting this socket arg is so that we don't get the nasty warning
 	} else {
